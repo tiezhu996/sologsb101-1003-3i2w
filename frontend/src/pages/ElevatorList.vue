@@ -135,7 +135,7 @@ const detailRectifies = computed<RectifyView[]>(() =>
 const detailRescues = computed(() =>
   elevatorStore.rescues
     .filter((item) => item.elevatorId === detailElevatorId.value)
-    .sort((a, b) => b.alarmAt.localeCompare(a.alarmAt)),
+    .sort((a, b) => b.firstAlarmAt.localeCompare(a.firstAlarmAt)),
 );
 
 const rectifyColumns: DataTableColumns<RectifyView> = [
@@ -220,10 +220,17 @@ async function removeElevator(id: string): Promise<void> {
 }
 
 const rescueColumns: DataTableColumns<(typeof elevatorStore.rescues)[number]> = [
-  { title: '报警时间', key: 'alarmAt', width: 150 },
+  { title: '第一次报警时间', key: 'firstAlarmAt', width: 160 },
+  {
+    title: '当前报警时间',
+    key: 'alarmAt',
+    width: 160,
+    render: (row) => (row.alarmAt === row.firstAlarmAt ? row.alarmAt : `${row.alarmAt}（已改动）`),
+  },
+  { title: '到场时间', key: 'arriveAt', width: 150, render: (row) => row.arriveAt || '待补录' },
   { title: '原因', key: 'cause', minWidth: 140 },
-  { title: '被困人数', key: 'trappedCount', width: 100 },
-  { title: '救援人', key: 'responder', width: 100 },
+  { title: '被困人数', key: 'trappedCount', width: 90 },
+  { title: '救援人', key: 'responder', width: 90 },
 ];
 </script>
 
@@ -541,8 +548,8 @@ const rescueColumns: DataTableColumns<(typeof elevatorStore.rescues)[number]> = 
                   v-for="rescue in detailRescues"
                   :key="rescue.id"
                   type="error"
-                  :title="rescue.alarmAt"
-                  :content="`${rescue.cause} · 被困 ${rescue.trappedCount} 人 · ${rescue.responder}`"
+                  :title="rescue.firstAlarmAt + (rescue.alarmAt !== rescue.firstAlarmAt ? `（报警已改为 ${rescue.alarmAt}）` : '')"
+                  :content="`${rescue.cause} · 被困 ${rescue.trappedCount} 人 · ${rescue.responder}${rescue.arriveAt ? '' : ' · 到场待补录'}`"
                 />
               </n-timeline>
               <n-data-table

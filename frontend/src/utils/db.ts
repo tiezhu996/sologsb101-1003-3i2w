@@ -20,7 +20,7 @@ import { nowDateTime, rescueMinutes, todayDate } from './duration';
 export const DB_NAME = 'gbelevsvc';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 export { ROW_REVISION };
 export type { Revisioned };
@@ -88,6 +88,40 @@ class ElevatorServiceDatabase extends Dexie {
           if (row.result === undefined) row.result = null;
         });
       });
+
+    // v3：困人事件以「第一次报警时间」为台账锚点（firstAlarmAt），新增 changes 改动记录；
+    //     到场 / 救出允许事后补录（空串），历史数据把当前报警时间视为第一次报警时间。
+    this.version(DB_SCHEMA_VERSION)
+      .stores({
+        elevators: 'id, regCode, owner, maintCycle, useDate',
+        plans: 'id, elevatorId, cycleType, state, planDate, executor, [elevatorId+planDate]',
+        checkItems: 'id, planId, seq, result, itemName, [planId+seq]',
+        rescues: 'id, elevatorId, alarmAt, firstAlarmAt, responder',
+        rectifies: 'id, elevatorId, state, dueDate, reviewer',
+        settings: 'id',
+      })
+      .upgrade(async (tx) => {
+        const tables: Array<Table<Record<string, unknown>, string>> = [
+          tx.table('elevators'),
+          tx.table('plans'),
+          tx.table('checkItems'),
+          tx.table('rescues'),
+          tx.table('rectifies'),
+        ];
+        for (const table of tables) {
+          await table.toCollection().modify((row: Record<string, unknown>) => {
+            row.revision = ROW_REVISION;
+          });
+        }
+        await tx.table('rescues').toCollection().modify((row: Record<string, unknown>) => {
+          if (typeof row.firstAlarmAt !== 'string') {
+            row.firstAlarmAt = typeof row.alarmAt === 'string' ? row.alarmAt : nowDateTime();
+          }
+          if (!Array.isArray(row.changes)) row.changes = [];
+          if (typeof row.arriveAt !== 'string') row.arriveAt = '';
+          if (typeof row.rescueAt !== 'string') row.rescueAt = '';
+        });
+      });
   }
 }
 
@@ -121,6 +155,10 @@ interface SeedElevatorSpec {
     cause: string;
     trappedCount: number;
     responder: string;
+    /** 演示用：当前登记的报警时间相对第一次报警后移的分钟数（事后改动） */
+    alarmShiftMinutes?: number;
+    /** 演示用：到场为事后补录，补录发生在救出时间点 */
+    arriveBackfilled?: boolean;
   }>;
   rectifies: Array<{ item: string; dueOffsetDays: number; state: Rectify['state']; reviewer: string }>;
 }
@@ -148,6 +186,7 @@ const SEED_ELEVATORS: SeedElevatorSpec[] = [
         cause: '门锁回路故障',
         trappedCount: 2,
         responder: '刘建国',
+        arriveBackfilled: true,
       },
       {
         offsetDays: -3,
@@ -157,6 +196,7 @@ const SEED_ELEVATORS: SeedElevatorSpec[] = [
         cause: '变频器故障',
         trappedCount: 1,
         responder: '张海涛',
+        alarmShiftMinutes: 20,
       },
     ],
     rectifies: [
@@ -250,6 +290,16 @@ function buildCheckItems(
   });
 }
 
+/** "yyyy-MM-dd HH:mm" 加减分钟（用于播种补录 / 改动后的时间） */
+function shiftDateTimeMinutes(value: string, minutes: number): string {
+  const ts = new Date(value.replace(' ', 'T')).getTime() + minutes * 60000;
+  const date = new Date(ts);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+    date.getMinutes(),
+  )}`;
+}
+
 /** 播种：3 台电梯 × 2~4 个计划 × 每计划 5~10 个保养项 + 困人事件 + 整改单 */
 async function seedDatabase(): Promise<void> {
   const stamp = nowDateTime();
@@ -294,16 +344,36 @@ async function seedDatabase(): Promise<void> {
 
     spec.rescues.forEach((rescueSpec, rescueIndex) => {
       const date = addDays(todayDate(), rescueSpec.offsetDays);
-      const alarmAt = `${date} ${String(rescueSpec.alarmHour).padStart(2, '0')}:05`;
+      const firstAlarmAt = `${date} ${String(rescueSpec.alarmHour).padStart(2, '0')}:05`;
       const arriveAt = `${date} ${String(
         rescueSpec.alarmHour + Math.floor((5 + rescueSpec.arriveLagMinutes) / 60),
       ).padStart(2, '0')}:${String((5 + rescueSpec.arriveLagMinutes) % 60).padStart(2, '0')}`;
       const rescueAt = `${date} ${String(
         rescueSpec.alarmHour + Math.floor((5 + rescueSpec.rescueLagMinutes) / 60),
       ).padStart(2, '0')}:${String((5 + rescueSpec.rescueLagMinutes) % 60).padStart(2, '0')}`;
+      const changes: Rescue['changes'] = [];
+      let alarmAt = firstAlarmAt;
+      if (rescueSpec.arriveBackfilled) {
+        // 演示：到场时间事后补录（补录发生在救出登记时）
+        changes.push({
+          at: rescueAt,
+          note: '事后补录到场时间，依据班组救援签到记录回填',
+          changes: [{ field: 'arriveAt', label: '到场时间', before: '', after: arriveAt }],
+        });
+      }
+      if (rescueSpec.alarmShiftMinutes) {
+        // 演示：报警时间被往后改过；台账仍以第一次报警时间算时长，迟到不会变准时
+        alarmAt = shiftDateTimeMinutes(firstAlarmAt, rescueSpec.alarmShiftMinutes);
+        changes.push({
+          at: shiftDateTimeMinutes(rescueAt, 30),
+          note: '接警记录勘误：登记口径调整，原报警时间保留为第一次报警时间',
+          changes: [{ field: 'alarmAt', label: '报警时间', before: firstAlarmAt, after: alarmAt }],
+        });
+      }
       rescues.push({
         id: `rescue-${elevatorIndex + 1}-${rescueIndex + 1}`,
         elevatorId,
+        firstAlarmAt,
         alarmAt,
         arriveAt,
         rescueAt,
@@ -312,6 +382,7 @@ async function seedDatabase(): Promise<void> {
         responder: rescueSpec.responder,
         createdAt: stamp,
         revision: ROW_REVISION,
+        changes,
       });
     });
 
@@ -509,7 +580,16 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
       await db.elevators.bulkPut(snapshot.elevators ?? []);
       await db.plans.bulkPut(snapshot.plans ?? []);
       await db.checkItems.bulkPut(snapshot.checkItems ?? []);
-      await db.rescues.bulkPut(snapshot.rescues ?? []);
+      // 兼容旧版备份：缺第一次报警时间时以当前报警时间兜底，到场 / 救出空值与改动记录补齐
+      await db.rescues.bulkPut(
+        (snapshot.rescues ?? []).map((row) => ({
+          ...row,
+          firstAlarmAt: row.firstAlarmAt ?? row.alarmAt,
+          arriveAt: row.arriveAt ?? '',
+          rescueAt: row.rescueAt ?? '',
+          changes: Array.isArray(row.changes) ? row.changes : [],
+        })),
+      );
       await db.rectifies.bulkPut(snapshot.rectifies ?? []);
     },
   );
@@ -572,7 +652,7 @@ export function planDatesFrom(startDate: string, cycle: Plan['cycleType'], count
   return generatePlanDates(startDate, cycle, count);
 }
 
-/** 困人时长（分钟）便捷函数，供 store 派生使用 */
-export function rescueDurationMinutes(alarmAt: string, rescueAt: string): number {
+/** 困人时长（分钟）便捷函数，供 store 派生使用；救出未补录为 null */
+export function rescueDurationMinutes(alarmAt: string, rescueAt: string): number | null {
   return rescueMinutes(alarmAt, rescueAt);
 }

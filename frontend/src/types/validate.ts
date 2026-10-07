@@ -6,7 +6,8 @@ import type { CheckItemView, CheckResult } from './checkItem';
 import { isAbnormal } from './checkItem';
 import type { ElevatorView, MaintCycle } from './elevator';
 import { CYCLE_DAYS } from '../utils/cycle';
-import { isOverdueDate } from '../utils/duration';
+import { isOverdueDate, parseDateTime } from '../utils/duration';
+import { ARRIVE_LIMIT_MINUTES } from './rescue';
 
 export interface ValidationResult {
   ok: boolean;
@@ -62,6 +63,59 @@ export function validateSign(items: CheckItemView[]): ValidationResult {
 /** 判断某结果值是否为异常（对外暴露，供页面复用） */
 export function resultIsAbnormal(result: CheckResult | null): boolean {
   return isAbnormal(result);
+}
+
+/** 救援时间线校验入参：firstAlarmAt 为第一次报警锚点，到场 / 救出允许空（事后补录） */
+export interface RescueTimelineInput {
+  firstAlarmAt: string;
+  alarmAt: string;
+  arriveAt: string;
+  rescueAt: string;
+}
+
+/**
+ * 困人救援时间线校验。
+ * 口径固定：到场 / 救出必须不早于「第一次报警时间」，与当前登记的报警时间是否被改动无关——
+ * 防止事后把报警时间往后改，使迟到记录被算成按时。
+ */
+export function validateRescueTimeline(input: RescueTimelineInput): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const first = parseDateTime(input.firstAlarmAt);
+  const alarm = parseDateTime(input.alarmAt);
+  const arrive = input.arriveAt ? parseDateTime(input.arriveAt) : null;
+  const rescue = input.rescueAt ? parseDateTime(input.rescueAt) : null;
+
+  if (Number.isNaN(first)) errors.push('第一次报警时间无效');
+  if (!Number.isNaN(first) && !Number.isNaN(alarm) && alarm !== first) {
+    warnings.push('当前报警时间与第一次报警时间不一致；时长与超时判定仍以第一次报警时间为准');
+  }
+  if (arrive !== null && !Number.isNaN(arrive) && !Number.isNaN(first) && arrive < first) {
+    errors.push(`到场时间（${input.arriveAt}）早于第一次报警时间（${input.firstAlarmAt}）`);
+  }
+  if (rescue !== null && !Number.isNaN(rescue) && !Number.isNaN(first) && rescue < first) {
+    errors.push(`救出时间（${input.rescueAt}）早于第一次报警时间（${input.firstAlarmAt}）`);
+  }
+  if (
+    arrive !== null &&
+    rescue !== null &&
+    !Number.isNaN(arrive) &&
+    !Number.isNaN(rescue) &&
+    rescue < arrive
+  ) {
+    errors.push(`救出时间（${input.rescueAt}）早于到场时间（${input.arriveAt}）`);
+  }
+  if (
+    arrive !== null &&
+    !Number.isNaN(arrive) &&
+    !Number.isNaN(first) &&
+    arrive - first > ARRIVE_LIMIT_MINUTES * 60000
+  ) {
+    warnings.push(
+      `按第一次报警时间算到场已超过 ${ARRIVE_LIMIT_MINUTES} 分钟时限，保存后该事件将计入超时复盘`,
+    );
+  }
+  return { ok: errors.length === 0, errors, warnings };
 }
 
 /** 整改限期校验 */

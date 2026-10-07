@@ -27,7 +27,7 @@ docker compose up -d --build # 代码改动后重建
 - 按周期批量生成保养计划、指派执行人、跟踪逾期
 - 逐项填写实测值与结果（正常 / 异常 / 建议）并签署，签署时校验未填项
 - 异常项一键转年检整改单，复核通过后关闭
-- 录入困人救援的报警 / 到场 / 救出时间，自动计算到场与救援时长并按 30 分钟到场要求判定
+- 录入困人救援的第一次报警 / 到场 / 救出时间（到场、救出可事后补录），以**第一次报警时间**为不可变锚点自动计算到场与救援时长并按 30 分钟到场要求判定；事后改动报警时间不移动锚点、不改超时结论，每次编辑必须填写改动说明并留存改动前后记录（含 CSV 导出）
 - 整库 JSON 导出 / 导入与 IndexedDB 结构版本查看
 
 本项目为**纯前端单页应用**：无后端、无数据库服务、无外部接口，全部数据保存在浏览器 IndexedDB。
@@ -90,7 +90,7 @@ sologsb101-1003/
 ## 六、数据存储说明
 
 - **存储介质**：浏览器 IndexedDB，库名 **`gbelevsvc`**，通过 Dexie 4.x 封装。
-- **数据结构版本**：`utils/db.ts` 中 `DB_SCHEMA_VERSION = 2`，并登记 v1 → v2 的 `upgrade` 迁移（补齐行修订号、迁移 `executorName → executor`、初始化保养项结果字段、新增 `settings` 表）。
+- **数据结构版本**：`utils/db.ts` 中 `DB_SCHEMA_VERSION = 3`，并登记 v1 → v2、v2 → v3 的 `upgrade` 迁移（补齐行修订号、迁移 `executorName → executor`、初始化保养项结果字段、新增 `settings` 表；v3 为困人事件补不可变的第一次报警锚点 `firstAlarmAt` 与 `changes` 改动记录，到场 / 救出允许事后补录空值）。
 - **数据表**：
 
   | 表名 | 实体 | 主要索引 |
@@ -98,7 +98,7 @@ sologsb101-1003/
   | `elevators` | 电梯 | id / regCode / owner / maintCycle / useDate |
   | `plans` | 保养计划 | id / elevatorId / cycleType / state / planDate / executor / [elevatorId+planDate] |
   | `checkItems` | 保养项 | id / planId / seq / result / itemName / [planId+seq] |
-  | `rescues` | 困人事件 | id / elevatorId / alarmAt / responder |
+  | `rescues` | 困人事件 | id / elevatorId / alarmAt / firstAlarmAt / responder |
   | `rectifies` | 整改单 | id / elevatorId / state / dueDate / reviewer |
   | `settings` | 自定义字典 | id |
 

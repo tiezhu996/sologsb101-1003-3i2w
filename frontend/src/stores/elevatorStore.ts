@@ -151,7 +151,7 @@ export const useElevatorStore = defineStore('elevator', () => {
       }).length;
       const ownedRescues = rescues.value
         .filter((item) => item.elevatorId === elevator.id)
-        .sort((a, b) => b.alarmAt.localeCompare(a.alarmAt));
+        .sort((a, b) => b.firstAlarmAt.localeCompare(a.firstAlarmAt));
       const lastRescue = ownedRescues[0];
       const signed = ownedPlans.filter((item) => item.state === 'signed');
       const lastSignedDate =
@@ -163,7 +163,7 @@ export const useElevatorStore = defineStore('elevator', () => {
         planCount: ownedPlans.length,
         overduePlanCount,
         pendingRectifyCount,
-        lastRescueMinutes: lastRescue ? rescueMinutes(lastRescue.alarmAt, lastRescue.rescueAt) : null,
+        lastRescueMinutes: lastRescue ? rescueMinutes(lastRescue.firstAlarmAt, lastRescue.rescueAt) : null,
         nextPlanDate: nextPlanDate(lastSignedDate, elevator.maintCycle),
       };
     }),

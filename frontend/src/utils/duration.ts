@@ -7,23 +7,29 @@ export function parseDateTime(value: string): number {
   return new Date(normalized).getTime();
 }
 
-/** 两时间点间隔分钟数，非法输入或负值返回 0 */
-export function minutesBetween(from: string, to: string): number {
+/** 两时间点间隔分钟数，非法输入返回 null；to 为空（事后未补录）返回 null */
+export function minutesBetweenOrNull(from: string, to: string): number | null {
+  if (!to) return null;
   const start = parseDateTime(from);
   const end = parseDateTime(to);
-  if (Number.isNaN(start) || Number.isNaN(end)) return 0;
+  if (Number.isNaN(start) || Number.isNaN(end)) return null;
   const diff = Math.round((end - start) / 60000);
   return diff > 0 ? diff : 0;
 }
 
-/** 报警 → 到场分钟数 */
-export function arriveMinutes(alarmAt: string, arriveAt: string): number {
-  return minutesBetween(alarmAt, arriveAt);
+/** 两时间点间隔分钟数，非法输入或负值返回 0 */
+export function minutesBetween(from: string, to: string): number {
+  return minutesBetweenOrNull(from, to) ?? 0;
 }
 
-/** 报警 → 救出分钟数 */
-export function rescueMinutes(alarmAt: string, rescueAt: string): number {
-  return minutesBetween(alarmAt, rescueAt);
+/** 报警 → 到场分钟数（到场未补录为 null） */
+export function arriveMinutes(alarmAt: string, arriveAt: string): number | null {
+  return minutesBetweenOrNull(alarmAt, arriveAt);
+}
+
+/** 报警 → 救出分钟数（救出未补录为 null） */
+export function rescueMinutes(alarmAt: string, rescueAt: string): number | null {
+  return minutesBetweenOrNull(alarmAt, rescueAt);
 }
 
 /** 分钟格式化：不足 60 分钟显示分钟，否则显示小时+分钟 */
