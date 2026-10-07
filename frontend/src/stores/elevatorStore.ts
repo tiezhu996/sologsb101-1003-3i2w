@@ -21,9 +21,8 @@ import {
 import type { ElevatorDraft, ElevatorView } from '../types/elevator';
 import { isPlanOverdue } from '../types/plan';
 import { overdueDaysOf } from '../types/rectify';
-import { rescueMinutes } from '../utils/duration';
+import { lagMinutes, nowDateTime } from '../utils/duration';
 import { nextPlanDate } from '../utils/cycle';
-import { nowDateTime } from '../utils/duration';
 import { uuid } from '../utils/export';
 import { emitChange, onChange } from '../utils/events';
 
@@ -151,7 +150,7 @@ export const useElevatorStore = defineStore('elevator', () => {
       }).length;
       const ownedRescues = rescues.value
         .filter((item) => item.elevatorId === elevator.id)
-        .sort((a, b) => b.alarmAt.localeCompare(a.alarmAt));
+        .sort((a, b) => b.firstAlarmAt.localeCompare(a.firstAlarmAt));
       const lastRescue = ownedRescues[0];
       const signed = ownedPlans.filter((item) => item.state === 'signed');
       const lastSignedDate =
@@ -163,7 +162,10 @@ export const useElevatorStore = defineStore('elevator', () => {
         planCount: ownedPlans.length,
         overduePlanCount,
         pendingRectifyCount,
-        lastRescueMinutes: lastRescue ? rescueMinutes(lastRescue.alarmAt, lastRescue.rescueAt) : null,
+        // 救援时长同样以首次报警时间为起点，未补录救出为 null
+        lastRescueMinutes: lastRescue
+          ? lagMinutes(lastRescue.firstAlarmAt, lastRescue.rescueAt)
+          : null,
         nextPlanDate: nextPlanDate(lastSignedDate, elevator.maintCycle),
       };
     }),

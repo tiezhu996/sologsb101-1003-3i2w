@@ -1,4 +1,9 @@
 /** 时长与超期计算：报警—到场—救出，超期天数与分钟/小时格式化 */
+import {
+  RESCUE_TIME_FIELD_LABEL,
+  type RescueTimeField,
+  type RescueTimelineConflict,
+} from '../types/rescue';
 
 /** "yyyy-MM-dd HH:mm" 解析为时间戳，非法输入返回 NaN */
 export function parseDateTime(value: string): number {
@@ -24,6 +29,26 @@ export function arriveMinutes(alarmAt: string, arriveAt: string): number {
 /** 报警 → 救出分钟数 */
 export function rescueMinutes(alarmAt: string, rescueAt: string): number {
   return minutesBetween(alarmAt, rescueAt);
+}
+
+/**
+ * 两时间点间隔分钟数（可空版）：任一端未补录（null / 空串）返回 null。
+ * 允许负数透传（不夹成 0），供冲突校验识别「补录时间早于锚点」。
+ */
+export function minutesBetweenNullable(
+  from: string,
+  to: string | null,
+): number | null {
+  if (!to) return null;
+  const start = parseDateTime(from);
+  const end = parseDateTime(to);
+  if (Number.isNaN(start) || Number.isNaN(end)) return null;
+  return Math.round((end - start) / 60000);
+}
+
+/** 可空的报警 → 到场 / 救出分钟数，未补录返回 null */
+export function lagMinutes(from: string, to: string | null): number | null {
+  return minutesBetweenNullable(from, to);
 }
 
 /** 分钟格式化：不足 60 分钟显示分钟，否则显示小时+分钟 */
@@ -69,4 +94,53 @@ export function todayDate(now: Date = new Date()): string {
 export function nowDateTime(now: Date = new Date()): string {
   const pad = (value: number): string => String(value).padStart(2, '0');
   return `${todayDate(now)} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+}
+
+/**
+ * 时间线保存校验：所有时间点都不得早于「首次报警时间」这个固定锚点。
+ *
+ * 事后补录 / 修改时，现值 alarmAt 可能已经晚于 firstAlarmAt，但补录的到场、
+ * 救出时间仍以第一次报警时间为准（不能跟着被往后改的报警时间走），
+ * 否则迟到会被算成按时、复盘结论失真。
+ *
+ * @param anchor 首次报警时间 firstAlarmAt（新建时即当前填写的报警时间）
+ * @param times  本次保存的报警 / 到场 / 救出时间（未补录传 null）
+ * @returns 冲突项清单，空数组表示通过；调用方据此拦住保存并逐项指出冲突
+ */
+export function checkRescueTimeline(
+  anchor: string,
+  times: Partial<Record<RescueTimeField, string | null>>,
+): RescueTimelineConflict[] {
+  const anchorTs = parseDateTime(anchor);
+  if (Number.isNaN(anchorTs)) return [];
+  const conflicts: RescueTimelineConflict[] = [];
+  (Object.keys(RESCUE_TIME_FIELD_LABEL) as RescueTimeField[]).forEach((field) => {
+    const value = times[field];
+    if (!value) return;
+    const ts = parseDateTime(value);
+    if (Number.isNaN(ts)) return;
+    if (ts < anchorTs) {
+      conflicts.push({
+        field,
+        label: RESCUE_TIME_FIELD_LABEL[field],
+        message:
+          field === 'alarmAt'
+            ? `报警时间不能早于首次报警时间（${anchor}）；首次报警时间是固定复盘锚点，不随修改改动`
+            : `${RESCUE_TIME_FIELD_LABEL[field]}（${value}）早于首次报警时间（${anchor}），请核对后再保存`,
+      });
+    }
+  });
+  // 救出还不能早于到场（到场未补录时跳过）
+  if (times.arriveAt && times.rescueAt) {
+    const arriveTs = parseDateTime(times.arriveAt);
+    const rescueTs = parseDateTime(times.rescueAt);
+    if (!Number.isNaN(arriveTs) && !Number.isNaN(rescueTs) && rescueTs < arriveTs) {
+      conflicts.push({
+        field: 'rescueAt',
+        label: RESCUE_TIME_FIELD_LABEL.rescueAt,
+        message: `救出时间（${times.rescueAt}）早于到场时间（${times.arriveAt}），请核对后再保存`,
+      });
+    }
+  }
+  return conflicts;
 }

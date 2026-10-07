@@ -10,7 +10,7 @@ import type { Elevator } from '../types/elevator';
 import type { Plan } from '../types/plan';
 import type { CheckItem, CheckResult } from '../types/checkItem';
 import { itemsForCycle } from '../types/checkItem';
-import type { Rescue } from '../types/rescue';
+import type { Rescue, RescueChangeEntry } from '../types/rescue';
 import type { Rectify } from '../types/rectify';
 import { ROW_REVISION, type Revisioned } from '../types/persistence';
 import { addDays, generatePlanDates, nextPlanDate } from './cycle';
@@ -20,7 +20,7 @@ import { nowDateTime, rescueMinutes, todayDate } from './duration';
 export const DB_NAME = 'gbelevsvc';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 export { ROW_REVISION };
 export type { Revisioned };
@@ -88,6 +88,35 @@ class ElevatorServiceDatabase extends Dexie {
           if (row.result === undefined) row.result = null;
         });
       });
+
+    // v3：困人救援以「首次报警时间」为固定复盘锚点
+    //     - firstAlarmAt 不可变，时长 / 超时 / 导出一律从它起算
+    //     - arriveAt / rescueAt 允许为空（事后补录）
+    //     - changes 记录每次补录 / 修改的改动前后时间，重开仍在
+    this.version(DB_SCHEMA_VERSION)
+      .stores({
+        elevators: 'id, regCode, owner, maintCycle, useDate',
+        plans: 'id, elevatorId, cycleType, state, planDate, executor, [elevatorId+planDate]',
+        checkItems: 'id, planId, seq, result, itemName, [planId+seq]',
+        rescues: 'id, elevatorId, alarmAt, firstAlarmAt, responder',
+        rectifies: 'id, elevatorId, state, dueDate, reviewer',
+        settings: 'id',
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('rescues')
+          .toCollection()
+          .modify((row: Record<string, unknown>) => {
+            // 首次报警时间锚点：旧数据以当前报警时间兜底，此后不再随修改改动
+            if (typeof row.firstAlarmAt !== 'string') {
+              row.firstAlarmAt = typeof row.alarmAt === 'string' ? row.alarmAt : nowDateTime();
+            }
+            if (row.arriveAt === '') row.arriveAt = null;
+            if (row.rescueAt === '') row.rescueAt = null;
+            if (!Array.isArray(row.changes)) row.changes = [];
+            row.revision = ROW_REVISION;
+          });
+      });
   }
 }
 
@@ -116,8 +145,14 @@ interface SeedElevatorSpec {
   rescues: Array<{
     offsetDays: number;
     alarmHour: number;
-    arriveLagMinutes: number;
-    rescueLagMinutes: number;
+    /** 到场滞后分钟；缺省表示尚未补录到场 */
+    arriveLagMinutes?: number;
+    /** 救出滞后分钟；缺省表示尚未补录救出 */
+    rescueLagMinutes?: number;
+    /** 事后把报警时间登记成的时刻（分钟偏移，相对 05 分）；缺省表示未改过 */
+    alarmLoggedLagMinutes?: number;
+    /** 演示用改动记录 */
+    changes?: RescueChangeEntry[];
     cause: string;
     trappedCount: number;
     responder: string;
@@ -154,6 +189,20 @@ const SEED_ELEVATORS: SeedElevatorSpec[] = [
         alarmHour: 8,
         arriveLagMinutes: 36,
         rescueLagMinutes: 68,
+        // 事后登记报警时往后挪了 15 分钟：按现值算 21 分钟「按时」，
+        // 但首次报警 08:05 的锚点不变，实际 36 分钟超时
+        alarmLoggedLagMinutes: 15,
+        changes: [
+          {
+            at: `${addDays(todayDate(), -2)} 09:40`,
+            note: '事后补录到场与救出；报警登记时间据班组口述调整，首次报警时间以监控记录为准',
+            changes: [
+              { field: 'alarmAt', label: '报警时间', before: null, after: `${addDays(todayDate(), -3)} 08:20` },
+              { field: 'arriveAt', label: '到场时间', before: null, after: `${addDays(todayDate(), -3)} 08:41` },
+              { field: 'rescueAt', label: '救出时间', before: null, after: `${addDays(todayDate(), -3)} 09:13` },
+            ],
+          },
+        ],
         cause: '变频器故障',
         trappedCount: 1,
         responder: '张海涛',
@@ -202,7 +251,16 @@ const SEED_ELEVATORS: SeedElevatorSpec[] = [
       { cycleType: 'halfMonth', offsetDays: -31, executor: '刘建国', state: 'signed', abnormalSeq: [], adviceSeq: [] },
       { cycleType: 'halfMonth', offsetDays: -2, executor: '刘建国', state: 'pending', abnormalSeq: [], adviceSeq: [] },
     ],
-    rescues: [],
+    rescues: [
+      {
+        offsetDays: 0,
+        alarmHour: new Date().getHours(),
+        // 刚接警，到场 / 救出待补录
+        cause: '门锁回路故障',
+        trappedCount: 2,
+        responder: '刘建国',
+      },
+    ],
     rectifies: [
       { item: '超载保护装置失灵', dueOffsetDays: -11, state: 'reviewed', reviewer: '李强' },
       { item: '钢丝绳断丝超标', dueOffsetDays: 20, state: 'pending', reviewer: '李强' },
@@ -294,22 +352,31 @@ async function seedDatabase(): Promise<void> {
 
     spec.rescues.forEach((rescueSpec, rescueIndex) => {
       const date = addDays(todayDate(), rescueSpec.offsetDays);
-      const alarmAt = `${date} ${String(rescueSpec.alarmHour).padStart(2, '0')}:05`;
-      const arriveAt = `${date} ${String(
-        rescueSpec.alarmHour + Math.floor((5 + rescueSpec.arriveLagMinutes) / 60),
-      ).padStart(2, '0')}:${String((5 + rescueSpec.arriveLagMinutes) % 60).padStart(2, '0')}`;
-      const rescueAt = `${date} ${String(
-        rescueSpec.alarmHour + Math.floor((5 + rescueSpec.rescueLagMinutes) / 60),
-      ).padStart(2, '0')}:${String((5 + rescueSpec.rescueLagMinutes) % 60).padStart(2, '0')}`;
+      const baseMinute = 5 + (rescueSpec.alarmLoggedLagMinutes ?? 0);
+      const alarmAt = `${date} ${String(
+        rescueSpec.alarmHour + Math.floor(baseMinute / 60),
+      ).padStart(2, '0')}:${String(baseMinute % 60).padStart(2, '0')}`;
+      // 首次报警时间以真实接警时刻（05 分）为准，不受事后登记时间影响
+      const firstAlarmAt = `${date} ${String(rescueSpec.alarmHour).padStart(2, '0')}:05`;
+      const lagText = (lagMinutes: number): string =>
+        `${date} ${String(
+          rescueSpec.alarmHour + Math.floor((5 + lagMinutes) / 60),
+        ).padStart(2, '0')}:${String((5 + lagMinutes) % 60).padStart(2, '0')}`;
+      const arriveAt =
+        rescueSpec.arriveLagMinutes === undefined ? null : lagText(rescueSpec.arriveLagMinutes);
+      const rescueAt =
+        rescueSpec.rescueLagMinutes === undefined ? null : lagText(rescueSpec.rescueLagMinutes);
       rescues.push({
         id: `rescue-${elevatorIndex + 1}-${rescueIndex + 1}`,
         elevatorId,
+        firstAlarmAt,
         alarmAt,
         arriveAt,
         rescueAt,
         cause: rescueSpec.cause,
         trappedCount: rescueSpec.trappedCount,
         responder: rescueSpec.responder,
+        changes: rescueSpec.changes ?? [],
         createdAt: stamp,
         revision: ROW_REVISION,
       });
@@ -433,13 +500,30 @@ export async function removeCheckItem(id: string): Promise<void> {
 
 /* ============================ 困人事件 ============================ */
 
+/**
+ * 归一化困人事件行：兼容 v2 及更早数据 / 外部导入的旧版 JSON。
+ * firstAlarmAt 缺失时只以当前 alarmAt 兜底一次，之后永远以它为锚点。
+ */
+function normalizeRescue(row: RescueRow): RescueRow {
+  const firstAlarmAt =
+    typeof row.firstAlarmAt === 'string' && row.firstAlarmAt
+      ? row.firstAlarmAt
+      : row.alarmAt;
+  const arriveAt = typeof row.arriveAt === 'string' && row.arriveAt ? row.arriveAt : null;
+  const rescueAt = typeof row.rescueAt === 'string' && row.rescueAt ? row.rescueAt : null;
+  const changes = Array.isArray(row.changes) ? row.changes : [];
+  return { ...row, firstAlarmAt, arriveAt, rescueAt, changes };
+}
+
 export async function listRescues(): Promise<RescueRow[]> {
   const rows = await db.rescues.toArray();
-  return rows.sort((a, b) => b.alarmAt.localeCompare(a.alarmAt));
+  return rows
+    .map(normalizeRescue)
+    .sort((a, b) => b.firstAlarmAt.localeCompare(a.firstAlarmAt));
 }
 
 export async function putRescue(row: RescueRow): Promise<void> {
-  await db.rescues.put(row);
+  await db.rescues.put(normalizeRescue(row));
 }
 
 export async function removeRescue(id: string): Promise<void> {
@@ -509,7 +593,8 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
       await db.elevators.bulkPut(snapshot.elevators ?? []);
       await db.plans.bulkPut(snapshot.plans ?? []);
       await db.checkItems.bulkPut(snapshot.checkItems ?? []);
-      await db.rescues.bulkPut(snapshot.rescues ?? []);
+      // 归一化：兼容导入旧版本导出的困人事件（缺首次报警锚点 / 改动记录）
+      await db.rescues.bulkPut((snapshot.rescues ?? []).map(normalizeRescue));
       await db.rectifies.bulkPut(snapshot.rectifies ?? []);
     },
   );

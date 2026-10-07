@@ -94,7 +94,7 @@ function onMenuSelect(key: string): void {
           {{ planStore.planViews.filter((item) => item.overdue).length }}
         </div>
         <div>
-          困人均值 {{ formatAverageMinutes(rescueStore.rescueViews.reduce((sum, item) => sum + item.rescueMinutes, 0), rescueStore.rescueViews.length) }}
+          困人均值 {{ formatAverageMinutes(rescueStore.averageRescueMinutes, 1) }}（按首次报警起算）
         </div>
         <div>待整改 {{ rectifyStore.pendingViews.length }} 项</div>
       </div>
